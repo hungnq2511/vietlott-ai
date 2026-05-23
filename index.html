@@ -990,7 +990,9 @@ function generatePremium(draws, cfg, game){
   const scores = scoreNumbers(stats, cfg, 'ai', draws);
   const maxScore = Math.max(...scores.slice(1));
   const nd = nextDrawDate(game);
-  const seed = dateSeed(nd, game);
+  const today = new Date();
+  // Seed by TODAY (not next-draw) → mỗi ngày 1 bộ số mới
+  const seed = dateSeed(today, game);
 
   // Generate 200 candidates with seed, pick the one with highest composite quality
   return withSeed(seed, () => {
@@ -1076,9 +1078,10 @@ function renderPremium(){
       <li>• Frequency rank trung bình: <b>#${avgRank.toFixed(1)}</b> trong tổng ${cfg.max} số</li>
       <li>• Lẻ/Chẵn <b>${pick.odd}/${cfg.pick-pick.odd}</b> · Spread <b>${pick.spread}</b> — match phân phối lịch sử</li>
     </ul>
-    <p class="mt-2 text-[10px] text-gray-500 italic">⚠️ Bộ số deterministic theo ngày — refresh không thay đổi. Reset 00:00 mỗi ngày. Chơi có trách nhiệm.</p>
+    <p class="mt-2 text-[10px] text-gray-500 italic">⚠️ Bộ số đổi mỗi ngày lúc 00:00 (giờ máy). Refresh trong cùng ngày → cùng bộ số. Chơi có trách nhiệm.</p>
   `;
-  $('#premiumMeta').innerHTML = `AI Ensemble · 200 candidates · seeded by ${nd.toISOString().slice(0,10)}`;
+  const todayStr = new Date().toISOString().slice(0,10);
+  $('#premiumMeta').innerHTML = `AI Ensemble · 200 candidates · daily refresh · ${todayStr}`;
 }
 
 function renderAll(){
