@@ -638,6 +638,7 @@ function parseCacheKey(key){
 }
 
 function setCachedPred(game, date, pred){
+  if(!pred.created_at) pred.created_at = new Date().toISOString();
   try { localStorage.setItem(predCacheKey(game, date), JSON.stringify(pred)) } catch(e){}
   const { drawDate, time, kind } = parseCacheKey(date);
   fetch(`${SUPABASE_URL}/rest/v1/predictions`, {
@@ -674,6 +675,7 @@ async function syncFromSupabase(){
           sum: r.sum_value,
           odd: r.odd_count,
           spread: r.spread,
+          created_at: r.created_at,    // proof of immutability
         };
         try { localStorage.setItem(predCacheKey(game, key), JSON.stringify(pred)) } catch(e){}
       });
@@ -801,7 +803,8 @@ function renderRecent(stats, cfg){
         </div>
         <div class="flex items-center gap-3">
           <div class="w-20 text-[10px] text-gray-500 uppercase flex-shrink-0">🧠 Dự đoán</div>
-          <div class="flex flex-wrap items-center">${ballPred}</div>
+          <div class="flex flex-wrap items-center flex-1">${ballPred}</div>
+          ${pred?.created_at ? `<div class="text-[9px] text-purple-300/70 flex-shrink-0" title="Dự đoán này đã được khoá vĩnh viễn từ thời điểm này">🔒 ${new Date(pred.created_at).toLocaleString('vi-VN',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>` : ''}
         </div>
       </div>
     `;
@@ -1015,8 +1018,10 @@ function renderPremium(){
     </ul>
     <p class="mt-2 text-[10px] text-gray-500 italic">⚠️ Bộ số đổi mỗi ngày lúc 00:00 (giờ máy). Refresh trong cùng ngày → cùng bộ số. Chơi có trách nhiệm.</p>
   `;
-  const todayStr = new Date().toISOString().slice(0,10);
-  $('#premiumMeta').innerHTML = `AI Ensemble · 200 candidates · daily refresh · ${todayStr}`;
+  const lockedAt = pick.created_at
+    ? new Date(pick.created_at).toLocaleString('vi-VN',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+    : 'vừa tạo';
+  $('#premiumMeta').innerHTML = `AI Ensemble · 🔒 locked ${lockedAt} · algo ${PRED_CACHE_VERSION}`;
 }
 
 function renderAll(){
