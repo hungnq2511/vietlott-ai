@@ -326,6 +326,11 @@ function computeStats(draws, cfg){
   const ema = Array(N+1).fill(0);        // EMA momentum
   const alpha = 0.1;
 
+  // bonus tracking (Power 6/55, Max 5/35)
+  const bonusFreq = Array(N+1).fill(0);
+  const bonusLastSeen = Array(N+1).fill(draws.length);
+  let bonusTotal = 0;
+
   // markov transition: P(n_t | k_{t-1})
   const transition = Array.from({length:N+1}, () => Array(N+1).fill(0));
   const prevCounts = Array(N+1).fill(0);
@@ -335,8 +340,12 @@ function computeStats(draws, cfg){
       freq[n]++;
       if(lastSeen[n] === draws.length) lastSeen[n] = idx;
       if(idx < 30) recentFreq[n]++;
-      // EMA: most recent draw idx=0 has highest weight
     });
+    if(cfg.bonus && d.bonus){
+      bonusFreq[d.bonus]++;
+      bonusTotal++;
+      if(bonusLastSeen[d.bonus] === draws.length) bonusLastSeen[d.bonus] = idx;
+    }
     // build markov from idx+1 -> idx (newer)
     if(idx < draws.length-1){
       const prev = draws[idx+1].numbers;
@@ -372,7 +381,8 @@ function computeStats(draws, cfg){
   const avgSum = sums.reduce((a,b)=>a+b,0)/sums.length;
   const stdSum = Math.sqrt(sums.reduce((a,b)=>a+(b-avgSum)**2,0)/sums.length);
 
-  return { freq, lastSeen, recentFreq, ema, transition, prevCounts, topPairs, pairs, sums, oddCounts, avgSum, stdSum };
+  return { freq, lastSeen, recentFreq, ema, transition, prevCounts, topPairs, pairs, sums, oddCounts, avgSum, stdSum,
+    bonusFreq, bonusLastSeen, bonusTotal };
 }
 
 // ============================================================
@@ -439,6 +449,38 @@ function pairBoost(stats, picked, candidate){
     boost += (stats.pairs[k] || 0);
   });
   return 1 + boost / (picked.length * 20);
+}
+
+// Dự đoán bonus (số đặc biệt) — score riêng dựa trên tần suất xuất hiện làm bonus + gap
+function predictBonus(stats, cfg, mainNumbers){
+  if(!cfg.bonus || !stats.bonusTotal) return null;
+  const N = cfg.max;
+  const expected = stats.bonusTotal / N;
+  const mainSet = new Set(mainNumbers);
+  const scores = Array(N+1).fill(0);
+  for(let n=1; n<=N; n++){
+    if(mainSet.has(n)) continue;
+    const bayesian = (stats.bonusFreq[n] + 1) / (expected + 1);
+    const gap = stats.bonusLastSeen[n];
+    const dueness = Math.tanh(gap / (N * 1.5));
+    // Cũng dùng general frequency làm tín hiệu phụ (số nóng tổng thể có xu hướng cũng được pick làm bonus)
+    const generalRatio = stats.freq[n] / (stats.freq.reduce((a,b)=>a+b,0) / N);
+    scores[n] = bayesian * 1.5 + dueness * 0.8 + generalRatio * 0.3;
+  }
+  // Weighted random sampling
+  const total = scores.reduce((a,b)=>a+b, 0);
+  if(total <= 0) return null;
+  let r = Math.random() * total;
+  for(let n=1; n<=N; n++){
+    r -= scores[n];
+    if(r <= 0 && !mainSet.has(n)) return n;
+  }
+  // Fallback: best score not in main
+  let best = 0, bestScore = -Infinity;
+  for(let n=1; n<=N; n++){
+    if(!mainSet.has(n) && scores[n] > bestScore){ bestScore = scores[n]; best = n }
+  }
+  return best || null;
 }
 
 function generateSet(scores, stats, cfg, useConstraints=true){
@@ -804,7 +846,7 @@ function evaluateDraw(d, stats, cfg, allDraws, drawIndex){
 }
 
 // Prediction cache — đảm bảo prediction cho mỗi (game, drawDate) STABLE vĩnh viễn
-const PRED_CACHE_VERSION = 'v2'; // bump nếu đổi thuật toán
+const PRED_CACHE_VERSION = 'v3'; // bump nếu đổi thuật toán (v3: thêm predicted bonus)
 function predCacheKey(game, date){ return `vl_pred_${PRED_CACHE_VERSION}_${game}_${date}` }
 function getCachedPred(game, date){
   try { const s = localStorage.getItem(predCacheKey(game, date)); return s ? JSON.parse(s) : null }
@@ -841,7 +883,10 @@ function backtestPredict(drawIdx, cfg, game){
       let consec = 0;
       for(let j=1;j<s.numbers.length;j++) if(s.numbers[j]-s.numbers[j-1]===1) consec++;
       const finalQ = s.quality + conf*5 - consec*0.5;
-      if(!best || finalQ > best.finalQ) best = { numbers:s.numbers, confidence: Math.min(0.99, conf), sum:s.sum, odd:s.odd, spread:s.spread };
+      if(!best || finalQ > best.finalQ) best = { numbers:s.numbers, confidence: Math.min(0.99, conf), sum:s.sum, odd:s.odd, spread:s.spread, finalQ };
+    }
+    if(best && cfg.bonus){
+      best.bonus = predictBonus(pastStats, cfg, best.numbers);
     }
     return best;
   });
@@ -865,13 +910,15 @@ function renderRecent(stats, cfg){
     if(pred){ totalMatches += matches.length; totalChecked++ }
 
     const matchCount = matches.length;
-    const matchBg = matchCount >= 3 ? 'from-red-500/20 to-red-500/0 border-red-500/30'
+    const bonusHitEarly = pred && cfg.bonus && pred.bonus && d.bonus === pred.bonus;
+    const matchBg = matchCount >= 3 || bonusHitEarly ? 'from-red-500/20 to-red-500/0 border-red-500/30'
                   : matchCount >= 1 ? 'from-yellow-500/10 to-yellow-500/0 border-yellow-500/20'
                   : 'from-white/[0.02] to-transparent border-white/5';
+    const bonusSuffix = bonusHitEarly ? ' + ĐB' : '';
     const matchBadge = pred
-      ? (matchCount >= 3 ? `<span class="pill" style="background:rgba(220,38,38,0.2);color:#fca5a5;border:1px solid rgba(239,68,68,0.4)">🎯 ${matchCount}/${cfg.pick} trúng</span>`
-        : matchCount >= 1 ? `<span class="pill" style="background:rgba(250,204,21,0.15);color:#fde047">⚡ ${matchCount}/${cfg.pick} trúng</span>`
-        : `<span class="pill bg-white/5 text-gray-500">0/${cfg.pick} trúng</span>`)
+      ? (matchCount >= 3 || bonusHitEarly ? `<span class="pill" style="background:rgba(220,38,38,0.2);color:#fca5a5;border:1px solid rgba(239,68,68,0.4)">🎯 ${matchCount}/${cfg.pick} trúng${bonusSuffix}</span>`
+        : matchCount >= 1 ? `<span class="pill" style="background:rgba(250,204,21,0.15);color:#fde047">⚡ ${matchCount}/${cfg.pick} trúng${bonusSuffix}</span>`
+        : `<span class="pill bg-white/5 text-gray-500">0/${cfg.pick} trúng${bonusSuffix}</span>`)
       : `<span class="pill bg-white/5 text-gray-500">không đủ data</span>`;
 
     let ballActual = d.numbers.map(n => {
@@ -883,10 +930,16 @@ function renderRecent(stats, cfg){
       ballActual += `<span class="bonus-sep">+</span><span class="ball sm bonus ${hitBonus?'match':''}" data-label="${cfg.bonusLabel}" style="margin:2px">${String(d.bonus).padStart(2,'0')}</span>`;
     }
 
-    const ballPred = pred ? pred.numbers.map(n => {
+    let ballPred = pred ? pred.numbers.map(n => {
       const hit = actualSet.has(n);
       return `<span class="ball sm ${hit?'match':'ai'}" style="margin:2px">${String(n).padStart(2,'0')}</span>`;
     }).join('') : '<span class="text-[11px] text-gray-600 italic">—</span>';
+    let bonusMatch = false;
+    if(pred && cfg.bonus && pred.bonus){
+      bonusMatch = d.bonus === pred.bonus;
+      const bonusInActualMain = actualSet.has(pred.bonus);
+      ballPred += `<span class="bonus-sep">+</span><span class="ball sm ${bonusMatch||bonusInActualMain?'match':'bonus'}" data-label="${cfg.bonusLabel}" style="margin:2px">${String(pred.bonus).padStart(2,'0')}</span>`;
+    }
 
     const card = document.createElement('div');
     card.className = `bg-gradient-to-r ${matchBg} border rounded-xl p-3`;
@@ -997,6 +1050,9 @@ function generatePremium(draws, cfg, game){
         best = { numbers:s.numbers, confidence: Math.min(0.99, conf), sum:s.sum, odd:s.odd, spread:s.spread, quality:s.quality };
       }
     }
+    if(best && cfg.bonus){
+      best.bonus = predictBonus(stats, cfg, best.numbers);
+    }
     return best;
   });
   if(result) setCachedPred(game, cacheKey, result);
@@ -1035,7 +1091,7 @@ function renderPremium(){
 
   // render balls big
   const sortedFreq = pick.stats.freq.map((c,i)=>({n:i,c})).slice(1).sort((a,b)=>b.c-a.c);
-  const ballsHtml = pick.numbers.map(n => {
+  let ballsHtml = pick.numbers.map(n => {
     const r = sortedFreq.findIndex(x=>x.n===n)+1;
     const gap = pick.stats.lastSeen[n];
     const hit = actualSet.has(n);
@@ -1045,6 +1101,20 @@ function renderPremium(){
       <div class="text-[9px] text-purple-300">gap ${gap}</div>
     </div>`;
   }).join('');
+
+  // Predicted bonus
+  if(cfg.bonus && pick.bonus){
+    const bonusHit = actualToday && actualToday.bonus === pick.bonus;
+    const bonusInMain = actualSet.has(pick.bonus);
+    const bGap = pick.stats.bonusLastSeen[pick.bonus] ?? '-';
+    const bFreq = pick.stats.bonusFreq[pick.bonus] || 0;
+    ballsHtml += `<div class="inline-flex flex-col items-center mx-1.5 my-1">
+      <div class="text-[9px] text-yellow-300 font-bold mb-1">+ ${cfg.bonusLabel}</div>
+      <span class="ball ${bonusHit||bonusInMain?'match':'bonus'}" data-label="${cfg.bonusLabel}" style="width:54px;height:54px;font-size:18px">${String(pick.bonus).padStart(2,'0')}</span>
+      <div class="text-[9px] ${bonusHit?'text-red-300 font-bold':bonusInMain?'text-yellow-300':'text-gray-400'} mt-1">${bonusHit?'TRÚNG ĐB':bonusInMain?'trùng main':'bonus '+bFreq+'x'}</div>
+      <div class="text-[9px] text-yellow-200">gap ${bGap}</div>
+    </div>`;
+  }
 
   let actualHtml;
   if(actualToday){
