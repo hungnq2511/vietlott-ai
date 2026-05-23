@@ -243,12 +243,24 @@ function looksLikeWrongGame(nums, cfg){
 
 async function fetchFresh(game){
   const cfg = GAMES[game];
-  const url = `https://r.jina.ai/https://xskt.com.vn/xsdt/${cfg.xskt}`;
-  const res = await fetch(url, { headers:{ 'Accept':'text/plain', 'X-Return-Format':'markdown' } });
-  if(!res.ok) throw new Error('HTTP '+res.status);
-  const md = await res.text();
   const draws = [];
   const seen = new Set();
+  // Multi-slot games (5/35): fetch từng slug page → list nhiều kỳ hơn + tránh cache stale
+  // Single-slot games: fetch overview page
+  const slugUrls = cfg.timeSlots
+    ? cfg.timeSlots.map(t => `xslotto-${t}`)  // ['xslotto-13h', 'xslotto-21h']
+    : [`xs${cfg.xsktSlug}`];                  // ['xspower'] hoặc ['xsmega645']
+  const buster = '?_=' + Date.now();
+  // Process từng page, gộp results
+  let combinedMd = '';
+  for(const slug of slugUrls){
+    try {
+      const url = `https://r.jina.ai/https://xskt.com.vn/${slug}${buster}`;
+      const res = await fetch(url, { headers:{ 'Accept':'text/plain', 'X-Return-Format':'markdown' } });
+      if(res.ok) combinedMd += '\n' + (await res.text());
+    } catch(e){ console.warn('xskt slug fail', slug, e) }
+  }
+  const md = combinedMd;
   // Anchor on game-specific URL slug + capture slug để biết time slot (5/35: lotto-13h vs lotto-21h)
   const re = new RegExp(
     `xs(${cfg.xsktSlug})/ngay-(\\d{1,2})-(\\d{1,2})-(\\d{4})` +
