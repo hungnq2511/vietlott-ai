@@ -184,9 +184,9 @@
 // CONFIG
 // ============================================================
 const GAMES = {
-  '6/55': { name:'Power 6/55', max:55, pick:6, source:'power655', xskt:'power-655', bonus:true,  bonusLabel:'JP2' },
+  '6/55': { name:'Power 6/55', max:55, pick:6, source:'power655', xskt:'power-655', bonus:true,  bonusMax:55, bonusLabel:'JP2' },
   '6/45': { name:'Mega 6/45',  max:45, pick:6, source:'power645', xskt:'mega-645',  bonus:false },
-  '5/35': { name:'Max 5/35',   max:35, pick:5, source:'power535', xskt:'power-535', bonus:true,  bonusLabel:'ĐB'  },
+  '5/35': { name:'Max 5/35',   max:35, pick:5, source:'power535', xskt:'power-535', bonus:true,  bonusMax:12, bonusLabel:'ĐB'  },
 };
 let currentGame = '6/55';
 let dataset = {};
@@ -215,7 +215,11 @@ async function fetchHistorical(game){
     .filter(Boolean)
     .map((r,i) => {
       const main = r.result.slice(0, cfg.pick).map(Number).sort((a,b)=>a-b);
-      const bonus = cfg.bonus && r.result.length > cfg.pick ? Number(r.result[cfg.pick]) : null;
+      let bonus = null;
+      if(cfg.bonus && r.result.length > cfg.pick){
+        const b = Number(r.result[cfg.pick]);
+        if(b >= 1 && b <= cfg.bonusMax) bonus = b;
+      }
       return { id:r.id||String(i+1), date:r.date, numbers:main, bonus };
     })
     .filter(d => d.numbers.length===cfg.pick && d.numbers.every(n => n>=1 && n<=cfg.max))
@@ -272,12 +276,16 @@ async function fetchFresh(game){
     if(seen.has(date)) continue;
     if(!isValidFreshDraw(date, game)) continue;
     // Tách main numbers vs bonus (sau dấu |)
-    const parts = nums.split('|').map(p => p.trim().split(/\s+/).map(Number).filter(n => n>=1 && n<=cfg.max));
-    const mainPart = parts[0] || [];
+    const parts = nums.split('|').map(p => p.trim().split(/\s+/).map(Number).filter(n => !isNaN(n)));
+    const mainPart = (parts[0] || []).filter(n => n>=1 && n<=cfg.max);
     const bonusPart = parts[1] || [];
     if(mainPart.length < cfg.pick) continue;
     const arr = mainPart.slice(0, cfg.pick).sort((a,b)=>a-b);
-    const bonus = cfg.bonus && bonusPart.length ? bonusPart[0] : null;
+    let bonus = null;
+    if(cfg.bonus && bonusPart.length){
+      const b = bonusPart[0];
+      if(b >= 1 && b <= cfg.bonusMax) bonus = b;
+    }
     if(looksLikeWrongGame(arr, cfg)){
       console.warn('Skipped suspicious result (likely cross-promo):', game, date, arr);
       continue;
@@ -451,34 +459,34 @@ function pairBoost(stats, picked, candidate){
   return 1 + boost / (picked.length * 20);
 }
 
-// Dự đoán bonus (số đặc biệt) — score riêng dựa trên tần suất xuất hiện làm bonus + gap
+// Dự đoán bonus (số đặc biệt) — bonus có pool riêng (bonusMax),
+// có thể overlap với main numbers (vd: 5/35 bonus 1-12, main 1-35).
+// Power 6/55: bonusMax=55, bonus được quay sau, có thể trùng hoặc khác main.
 function predictBonus(stats, cfg, mainNumbers){
   if(!cfg.bonus || !stats.bonusTotal) return null;
-  const N = cfg.max;
-  const expected = stats.bonusTotal / N;
-  const mainSet = new Set(mainNumbers);
-  const scores = Array(N+1).fill(0);
-  for(let n=1; n<=N; n++){
-    if(mainSet.has(n)) continue;
+  const M = cfg.bonusMax;
+  const expected = stats.bonusTotal / M;
+  // Chỉ với 6/55: bonus quay từ 1-55, theo luật có thể loại trừ main (depending on interpretation).
+  // Để an toàn về mặt thống kê, KHÔNG loại trừ main — bonus là độc lập, có thể trùng.
+  // Với 5/35 (1-12), không thể loại trừ vì pool quá nhỏ.
+  const scores = Array(M+1).fill(0);
+  for(let n=1; n<=M; n++){
     const bayesian = (stats.bonusFreq[n] + 1) / (expected + 1);
     const gap = stats.bonusLastSeen[n];
-    const dueness = Math.tanh(gap / (N * 1.5));
-    // Cũng dùng general frequency làm tín hiệu phụ (số nóng tổng thể có xu hướng cũng được pick làm bonus)
-    const generalRatio = stats.freq[n] / (stats.freq.reduce((a,b)=>a+b,0) / N);
-    scores[n] = bayesian * 1.5 + dueness * 0.8 + generalRatio * 0.3;
+    const dueness = Math.tanh(gap / (M * 1.5));
+    scores[n] = bayesian * 1.8 + dueness * 1.0;
   }
-  // Weighted random sampling
   const total = scores.reduce((a,b)=>a+b, 0);
   if(total <= 0) return null;
   let r = Math.random() * total;
-  for(let n=1; n<=N; n++){
+  for(let n=1; n<=M; n++){
     r -= scores[n];
-    if(r <= 0 && !mainSet.has(n)) return n;
+    if(r <= 0) return n;
   }
-  // Fallback: best score not in main
+  // Fallback: best score
   let best = 0, bestScore = -Infinity;
-  for(let n=1; n<=N; n++){
-    if(!mainSet.has(n) && scores[n] > bestScore){ bestScore = scores[n]; best = n }
+  for(let n=1; n<=M; n++){
+    if(scores[n] > bestScore){ bestScore = scores[n]; best = n }
   }
   return best || null;
 }
@@ -846,7 +854,7 @@ function evaluateDraw(d, stats, cfg, allDraws, drawIndex){
 }
 
 // Prediction cache — Supabase (L2 persistent) + localStorage (L1 fast)
-const PRED_CACHE_VERSION = 'v3';
+const PRED_CACHE_VERSION = 'v4'; // v4: bonusMax cho 5/35 (1-12)
 const SUPABASE_URL = 'https://bfstkfcuhomtetedexmq.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_C7422FmsYC23Bwh5ti_5xg_5LuV8GF7';
 const SB_HEADERS = { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY };
